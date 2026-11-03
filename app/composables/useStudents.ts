@@ -58,7 +58,8 @@ export function useStudents() {
   /**
    * The RAG pipeline: embed the thesis title (the query),
    * semantically search panelist expertise, and auto-assign the
-   * panel when a candidate clears the similarity threshold.
+   * panel from candidates that clear the similarity threshold and
+   * the LLM validator.
    */
   async function matchThesis(thesisId: number, title: string): Promise<ThesisMatchResult> {
     return $fetch<ThesisMatchResult>('/api/ai/match-thesis', {

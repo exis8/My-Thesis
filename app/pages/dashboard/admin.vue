@@ -2,6 +2,7 @@
 import {
   AlertCircle,
   ArrowRight,
+  Check,
   Search,
   CheckCircle2,
   Clock,
@@ -9,7 +10,9 @@ import {
   Download,
   Ellipsis,
   LayoutDashboard,
+  LayoutGrid,
   Link as LinkIcon,
+  List,
   Loader2,
   Pencil,
   Plus,
@@ -22,12 +25,11 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { useTransition } from '@vueuse/core'
+import { useClipboard, useTransition } from '@vueuse/core'
 import type { AdminPanelistEntry, AdminStudentEntry, AdminThesisPanelMember } from '~/composables/useAdmin'
 import type { ProgramChairperson } from '~/types/database'
 
@@ -141,6 +143,11 @@ function openStudents(filter: StudentFilter) {
   studentSearch.value = ''
   active.value = 'students'
 }
+
+// Same as c_max_assignments in auto_assign_panel: a full panelist is skipped.
+const PANEL_CAP = 5
+
+const panelistView = ref<'list' | 'cards'>('list')
 
 const panelistSearch = ref('')
 const filteredPanelists = computed(() => {
@@ -334,6 +341,14 @@ async function exportStudents() {
   URL.revokeObjectURL(url)
 }
 
+// ---- Shareable read-only student list ----
+const { copy: copyToClipboard, copied: shareLinkCopied } = useClipboard({ copiedDuring: 2000, legacy: true })
+
+function copyShareLink() {
+  if (profile.value)
+    copyToClipboard(`${window.location.origin}/students/${profile.value.share_token}`)
+}
+
 // ---- Delete panelist ----
 const isDeleteOpen = ref(false)
 const deleteTarget = ref<AdminPanelistEntry | null>(null)
@@ -509,10 +524,17 @@ onMounted(loadData)
             <h1 class="text-2xl font-bold">Students</h1>
             <p class="text-sm text-muted-foreground">{{ profile.program }}</p>
           </div>
-          <Button variant="outline" :disabled="filteredStudents.length === 0" @click="exportStudents">
-            <Download class="size-4" />
-            Download Excel
-          </Button>
+          <div class="flex flex-wrap gap-2">
+            <Button variant="outline" @click="copyShareLink">
+              <Check v-if="shareLinkCopied" class="size-4" />
+              <LinkIcon v-else class="size-4" />
+              <span aria-live="polite">{{ shareLinkCopied ? 'Link copied' : 'Copy share link' }}</span>
+            </Button>
+            <Button variant="outline" :disabled="filteredStudents.length === 0" @click="exportStudents">
+              <Download class="size-4" />
+              Download Excel
+            </Button>
+          </div>
         </div>
 
         <div class="flex flex-wrap items-center gap-3">
@@ -708,85 +730,109 @@ onMounted(loadData)
           No panelists yet. Add one to start auto-assigning panels.
         </div>
 
-        <div v-if="panelists.length > 0" class="relative w-full sm:w-72">
-          <Search class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input v-model="panelistSearch" type="search" placeholder="Search name or expertise" class="h-9 pl-9" aria-label="Search panelists" />
+        <div v-if="panelists.length > 0" class="flex flex-wrap items-center justify-between gap-3">
+          <div class="relative w-full sm:w-72">
+            <Search class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input v-model="panelistSearch" type="search" placeholder="Search name or expertise" class="h-9 pl-9" aria-label="Search panelists" />
+          </div>
+          <div class="flex gap-1.5" role="group" aria-label="Panelist layout">
+            <button
+              v-for="v in [{ key: 'list', label: 'List', icon: List }, { key: 'cards', label: 'Cards', icon: LayoutGrid }] as const"
+              :key="v.key"
+              type="button"
+              :aria-pressed="panelistView === v.key"
+              class="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-ring"
+              :class="panelistView === v.key ? 'border-primary bg-primary text-primary-foreground' : 'text-muted-foreground hover:border-primary hover:text-foreground'"
+              @click="panelistView = v.key"
+            >
+              <component :is="v.icon" class="size-3.5" />
+              {{ v.label }}
+            </button>
+          </div>
         </div>
         <p v-if="panelists.length > 0 && filteredPanelists.length === 0" class="text-sm text-muted-foreground">
           No panelists match your search.
         </p>
 
-        <TransitionGroup v-if="filteredPanelists.length > 0" tag="div" name="cards" class="relative grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          <Card v-for="panelist in filteredPanelists" :key="panelist.panel_id" class="h-full">
-            <CardHeader class="items-start">
-              <div class="flex min-w-0 items-center gap-3">
-                <Avatar class="size-12 shrink-0">
-                  <AvatarFallback class="bg-accent font-heading text-base font-semibold text-accent-foreground">
-                    {{ initials(panelist.full_name) }}
-                  </AvatarFallback>
-                </Avatar>
-                <div class="min-w-0">
-                  <CardTitle class="truncate font-heading text-base">{{ panelist.full_name }}</CardTitle>
-                  <CardDescription class="truncate">{{ panelist.position || 'No position set' }}</CardDescription>
-                </div>
+        <!-- One markup for both layouts; cards reuse the stacked (mobile) row order. -->
+        <TransitionGroup
+          v-if="filteredPanelists.length > 0"
+          tag="ul"
+          name="row"
+          :class="panelistView === 'list' ? 'divide-y rounded-lg border bg-card' : 'grid gap-4 sm:grid-cols-2 xl:grid-cols-3'"
+        >
+          <li
+            v-for="panelist in filteredPanelists"
+            :key="panelist.panel_id"
+            class="grid gap-x-6 gap-y-3 p-4"
+            :class="panelistView === 'list' ? 'sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)_auto] sm:items-start' : 'content-start rounded-lg border bg-card'"
+          >
+            <div class="flex min-w-0 items-center gap-3">
+              <Avatar class="size-10 shrink-0">
+                <AvatarFallback class="bg-secondary font-heading text-sm font-semibold text-secondary-foreground">
+                  {{ initials(panelist.full_name) }}
+                </AvatarFallback>
+              </Avatar>
+              <div class="min-w-0">
+                <p class="truncate font-heading font-semibold leading-tight">{{ panelist.full_name }}</p>
+                <p class="truncate text-sm text-muted-foreground">{{ panelist.position || 'No position set' }}</p>
               </div>
-              <CardAction>
-                <DropdownMenu>
-                  <DropdownMenuTrigger as-child>
-                    <Button variant="ghost" size="icon" class="size-8" :aria-label="`Actions for ${panelist.full_name}`">
-                      <Ellipsis class="size-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem @select="openEdit(panelist)">
-                      <Pencil class="size-4" />
-                      Edit details
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive" @select="confirmDelete(panelist)">
-                      <Trash2 class="size-4" />
-                      Remove panelist
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </CardAction>
-            </CardHeader>
+            </div>
 
-            <CardContent class="flex-1 space-y-4">
-              <dl class="grid grid-cols-2 divide-x rounded-md border">
-                <div class="px-3 py-2">
-                  <dt class="text-xs text-muted-foreground">Panels</dt>
-                  <dd class="font-heading text-lg font-semibold tabular-nums">{{ panelist.assignment_count }}</dd>
-                </div>
-                <div class="px-3 py-2">
-                  <dt class="text-xs text-muted-foreground">Expertise areas</dt>
-                  <dd class="font-heading text-lg font-semibold tabular-nums">{{ panelist.expertise.length }}</dd>
-                </div>
-              </dl>
+            <div class="order-last min-w-0" :class="panelistView === 'list' && 'sm:order-none'">
+              <div class="flex flex-wrap items-center gap-1.5">
+                <Badge v-for="tag in panelist.expertise" :key="tag.exs_id" variant="secondary" class="h-auto gap-1 whitespace-normal py-0.5 pr-1">
+                  {{ tag.expertise }}
+                  <button type="button" :aria-label="`Remove ${tag.expertise}`" class="rounded-full p-0.5 hover:bg-foreground/10" @click="submitRemoveExpertise(tag.exs_id)">
+                    <X class="size-3" />
+                  </button>
+                </Badge>
+                <form class="flex items-center gap-1" @submit.prevent="submitAddExpertise(panelist.panel_id)">
+                  <Input v-model="newExpertise[panelist.panel_id]" placeholder="Add expertise area" class="h-7 w-44 text-xs" :aria-label="`Add expertise for ${panelist.full_name}`" />
+                  <Button type="submit" size="icon" variant="outline" class="size-7 shrink-0" :aria-label="`Add expertise for ${panelist.full_name}`">
+                    <Plus class="size-3.5" />
+                  </Button>
+                </form>
+              </div>
+              <p v-if="panelist.expertise.length === 0" class="mt-2 text-xs text-destructive">
+                No expertise yet, so matching can't pick this panelist.
+              </p>
+            </div>
 
+            <div class="flex items-center justify-between gap-4" :class="panelistView === 'list' && 'sm:justify-end'">
               <div>
-                <p class="mb-2 text-xs text-muted-foreground">Expertise</p>
-                <div class="flex flex-wrap gap-1.5">
-                  <Badge v-for="tag in panelist.expertise" :key="tag.exs_id" variant="secondary" class="h-auto gap-1 whitespace-normal py-0.5 pr-1">
-                    {{ tag.expertise }}
-                    <button type="button" :aria-label="`Remove ${tag.expertise}`" class="rounded-full p-0.5 hover:bg-foreground/10" @click="submitRemoveExpertise(tag.exs_id)">
-                      <X class="size-3" />
-                    </button>
-                  </Badge>
-                  <span v-if="panelist.expertise.length === 0" class="text-xs text-muted-foreground">None yet. Add one so matching can pick this panelist.</span>
+                <div class="flex gap-1" aria-hidden="true">
+                  <span
+                    v-for="seat in PANEL_CAP"
+                    :key="seat"
+                    class="h-2 w-4 rounded-full"
+                    :class="seat <= panelist.assignment_count ? 'bg-primary' : 'bg-muted'"
+                  />
                 </div>
+                <p class="mt-1 text-xs tabular-nums" :class="panelist.assignment_count >= PANEL_CAP ? 'font-medium text-foreground' : 'text-muted-foreground'">
+                  {{ panelist.assignment_count >= PANEL_CAP ? `Full, ${panelist.assignment_count} panels` : `${panelist.assignment_count} of ${PANEL_CAP} panels` }}
+                </p>
               </div>
-            </CardContent>
-
-            <CardFooter class="border-t pt-4">
-              <form class="flex w-full items-center gap-1.5" @submit.prevent="submitAddExpertise(panelist.panel_id)">
-                <Input v-model="newExpertise[panelist.panel_id]" placeholder="Add expertise area" class="h-8 text-xs" :aria-label="`Add expertise for ${panelist.full_name}`" />
-                <Button type="submit" size="icon" variant="outline" class="size-8 shrink-0" aria-label="Add expertise">
-                  <Plus class="size-3.5" />
-                </Button>
-              </form>
-            </CardFooter>
-          </Card>
+              <DropdownMenu>
+                <DropdownMenuTrigger as-child>
+                  <Button variant="ghost" size="icon" class="size-8" :aria-label="`Actions for ${panelist.full_name}`">
+                    <Ellipsis class="size-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem @select="openEdit(panelist)">
+                    <Pencil class="size-4" />
+                    Edit details
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" @select="confirmDelete(panelist)">
+                    <Trash2 class="size-4" />
+                    Remove panelist
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          </li>
         </TransitionGroup>
 
         <Dialog v-model:open="isEditOpen">

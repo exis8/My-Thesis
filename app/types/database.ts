@@ -21,6 +21,7 @@ export interface ProgramChairperson {
   program: string
   position: string | null
   status: string | null
+  share_token: string
   created_at: string
 }
 

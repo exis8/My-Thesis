@@ -1,6 +1,6 @@
 // A candidate is only considered a genuine fit if its expertise tag's
 // cosine similarity to the thesis title is at least this close.
-const MATCH_THRESHOLD = 0.4
+const MATCH_THRESHOLD = 0.8
 
 interface RequestBody {
   thesisId: number
@@ -23,28 +23,47 @@ export default defineEventHandler(async (event) => {
   await supabase.rpc('set_thesis_embedding', { p_thesis_id: body.thesisId, p_embedding: queryEmbedding })
 
   // 3. Semantic search: retrieve the closest panelist expertise
-  // tags across all programs by cosine similarity.
+  // tags across all programs by cosine similarity. Fetch wide: the
+  // threshold decides who qualifies, not this limit, and one panelist
+  // can hold several of the closest tags.
   const { data: candidates, error: matchError } = await supabase.rpc('match_panelist_expertise', {
     p_query_embedding: queryEmbedding,
-    p_match_count: 10,
+    p_match_count: 50,
   })
   if (matchError)
     throw createError({ statusCode: 500, statusMessage: matchError.message })
 
-  const candidateList = (candidates ?? []) as Array<{ full_name: string, expertise: string, similarity: number }>
-  const isMatch = candidateList.some(c => c.similarity >= MATCH_THRESHOLD)
+  const closeMatches = ((candidates ?? []) as Array<{ panel_id: number, full_name: string, expertise: string, similarity: number }>)
+    .filter(c => c.similarity >= MATCH_THRESHOLD)
 
-  const matchedAreas = [...new Set(candidateList.filter(c => c.similarity >= MATCH_THRESHOLD).map(c => c.expertise))]
+  // Validator: nothing is assigned unless Gemini approves it, so a
+  // failed check stops the match rather than skipping the check.
+  const closeAreas = [...new Set(closeMatches.map(c => c.expertise))]
+  let matchedAreas: string[] = []
+  if (closeAreas.length) {
+    try {
+      matchedAreas = await validateExpertise(body.title, closeAreas)
+    }
+    catch (error) {
+      console.error(error)
+      throw createError({ statusCode: 502, statusMessage: 'Could not validate the panel match. Please try again.' })
+    }
+  }
+
+  const candidateList = closeMatches.filter(c => matchedAreas.includes(c.expertise))
+  const isMatch = candidateList.length > 0
+
   const response = isMatch
     ? `Found panelists whose tagged expertise closely matches this topic: ${matchedAreas.join(', ')}.`
     : 'No panelists with closely matching expertise were found yet.'
 
-  // 4. On a good match, fill the panel from the ranked candidates.
+  // 4. On a good match, fill the panel from the validated candidates.
   let panel = null
   if (isMatch) {
     const { data: panelData, error: assignError } = await supabase.rpc('auto_assign_panel', {
       p_thesis_id: body.thesisId,
       p_query_embedding: queryEmbedding,
+      p_panel_ids: [...new Set(candidateList.map(c => c.panel_id))],
     })
     if (assignError)
       throw createError({ statusCode: 500, statusMessage: assignError.message })
